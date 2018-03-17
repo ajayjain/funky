@@ -37,6 +37,9 @@
 using namespace dlib;
 using namespace std;
 
+// Hold detected face shapes for this many frames.
+#define MAX_STALE_FACE_FRAMES 3
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         cerr << "Usage: face_tracker path/to/shape_predictor_68_face_landmarks.dat <camera_index> <reference_images...>" << endl;
@@ -58,6 +61,9 @@ int main(int argc, char** argv) {
         shape_predictor pose_model;
         deserialize(argv[1]) >> pose_model;
 
+        std::vector<full_object_detection> shapes;
+        int num_frames_no_detection = 0;
+
         // Grab and process frames until the main window is closed by the user.
         while(!win.is_closed()) {
             // Grab a frame
@@ -75,11 +81,22 @@ int main(int argc, char** argv) {
 
             // Detect faces 
             std::vector<rectangle> faces = detector(cimg);
+
             // Find the pose of each face.
-            std::vector<full_object_detection> shapes;
-            for (unsigned long i = 0; i < faces.size(); ++i) {
-                shapes.push_back(pose_model(cimg, faces[i]));
+            if (faces.size() > 0) {
+                shapes.clear();
+                num_frames_no_detection = 0;
+
+                for (unsigned long i = 0; i < faces.size(); ++i) {
+                    shapes.push_back(pose_model(cimg, faces[i]));
+                }
+            } else if (num_frames_no_detection < MAX_STALE_FACE_FRAMES) {
+                num_frames_no_detection++;
+            } else {
+                shapes.clear();
+                num_frames_no_detection++;
             }
+
 
             // Display it all on the screen
             win.clear_overlay();
