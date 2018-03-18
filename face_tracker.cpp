@@ -35,6 +35,7 @@
 #include <dlib/image_processing.h>
 #include <dlib/image_io.h>
 #include <dlib/gui_widgets.h>
+#include <eigen3/Eigen/Core>
 
 #include <iostream>
 
@@ -43,13 +44,15 @@ using namespace std;
 
 // Hold detected face shapes for this many frames.
 constexpr int MAX_STALE_FACE_FRAMES = 3;
+constexpr int NUM_LANDMARKS = 68;
 constexpr int OUTER_LIP_START = 49;
 constexpr int NUM_OUTER_LIP_POINTS = 59 - OUTER_LIP_START + 2;
-
+constexpr int NUM_LIP_POINTS = 67 - OUTER_LIP_START + 1;
 
 namespace {
 
-    cv::Rect2i shape_bounding_box(full_object_detection shape, unsigned long start_index, unsigned long num_parts) {
+    cv::Rect2i shape_bounding_box(full_object_detection shape, int start_index, int num_parts,
+                                  int max_y = 0, int max_x = 0) {
         long tl_x = shape.part(start_index).x();
         long tl_y = shape.part(start_index).y();
         long br_x = shape.part(start_index).x();
@@ -63,18 +66,33 @@ namespace {
             br_y = MAX(br_y, point.y());
         }
 
-        cv::Rect2i bbox(tl_x, tl_y, br_x - tl_x + 1, br_y - tl_y + 1);
+        cv::Rect2i bbox(tl_x,
+                        tl_y,
+                        max_x > tl_x ? MIN(max_x - tl_x, br_x - tl_x + 1) : br_x - tl_x + 1,
+                        max_y > tl_y ? MIN(max_y - tl_y, br_y - tl_y + 1) : br_y - tl_y + 1);
         return bbox;
     }
 
-    cv::Mat crop_to_polygon(cv::Mat source, full_object_detection shape, unsigned long start_index, unsigned long num_parts) {
+    Eigen::Matrix2Xi shape_to_points(full_object_detection shape) {
+        Eigen::Matrix2Xi points(shape.num_parts(), 2);
+
+        for (unsigned long i = 0; i < shape.num_parts(); ++i) {
+            points(i, 0) = shape.part(i).x();
+            points(i, 1) = shape.part(i).y();
+        }
+
+        return points;
+    }
+
+    cv::Mat crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts) {
         // crop source to polygon defined by points shape.parts(start_index) through shape.parts(end_index)
 
-        const cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts);
+        cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols);
         cout << "Bounding box: " << bbox << endl;
 
         cv::Mat roi = source(bbox);
 
+#if 0
         // Translate shape points into frame
         std::vector<cv::Point2i> polygon(num_parts);
         for (unsigned long i = start_index; i < start_index + num_parts; ++i) {
@@ -83,14 +101,21 @@ namespace {
                     (int) shape.part(i).y() - bbox.y);
         }
 
-        // TODO: Mask out polygon
+        // Copy only pixels within polygon
         cv::Mat mask = cv::Mat::zeros(roi.rows, roi.cols, CV_8U);
-        cv::fillConvexPoly(mask, polygon.data(), num_parts, cv::Scalar(1));
-
+        cv::fillConvexPoly(mask, polygon.data(), num_parts, cv::Scalar(255));
         cv::Mat roi_masked;
-        roi.copyTo(roi, roi_masked);
+        roi.copyTo(roi_masked, mask);
+
+        cv::namedWindow("mask", cv::WINDOW_AUTOSIZE);
+        cv::imshow("mask", mask);
+
+        dlib::sleep(2000);
 
         return roi_masked;
+#else
+        return roi;
+#endif
     }
 
     void draw_shape(cv::Mat canvas, full_object_detection shape, unsigned long start_index, unsigned long num_parts) {
@@ -137,7 +162,7 @@ int main(int argc, char** argv) {
             cout << "pixel position of first part:  " << shape.part(0) << endl;
             cout << "pixel position of second part: " << shape.part(1) << endl;
 
-            cv::Mat cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS);
+            cv::Mat cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS);
             cv::cvtColor(cvmouth, cvmouth, cv::COLOR_BGR2RGB);
             cvmouths.emplace_back();
             cvmouth.copyTo(cvmouths.back());
@@ -152,7 +177,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        std::vector<full_object_detection> shapes;
+        std::vector<Eigen::Matrix2Xi> shapes;
         int num_frames_no_detection = 0;
 
         // Grab and process frames until the main window is closed by the user.
@@ -188,13 +213,13 @@ int main(int argc, char** argv) {
 
                 for (unsigned long i = 0; i < faces.size(); ++i) {
                     auto shape = pose_model(cimg, faces[i]);
+                    auto landmarks = shape_to_points(shape);
 
-                    //draw_shape(temp, shape, 0, shape.num_parts());
-                    draw_shape(temp, shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS);
+                    draw_shape(temp, shape, OUTER_LIP_START, NUM_LIP_POINTS);
 
-                    shapes.push_back(shape);
+                    shapes.push_back(landmarks);
 
-                    const cv::Rect2i dst_roi_bbox = shape_bounding_box(shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS);
+                    const cv::Rect2i dst_roi_bbox = shape_bounding_box(shape, OUTER_LIP_START, NUM_LIP_POINTS, temp.rows, temp.cols);
                     cv::Mat dst_roi = temp(dst_roi_bbox);
                     cv::imshow("dest", dst_roi);
 
@@ -217,18 +242,7 @@ int main(int argc, char** argv) {
             // Display it all on the screen
 
             cv::imshow("camera canvas", temp);
-#if 0
-            win.clear_overlay();
-            win.set_image(cimg);
-            //win.add_overlay(render_face_detections(shapes));
-
-            if (cvmouths.size() > 0) {
-                cv_image<rgb_pixel> mouth(cvmouths.at(0));
-                win.set_image(mouth);
-            }
-#endif
-
-            cv::waitKey(10);
+            cv::waitKey(20);
         }
     } catch(serialization_error& e) {
         cout << "You need dlib's default face landmarking model file to run this example." << endl;
