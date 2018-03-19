@@ -47,7 +47,7 @@ typedef std::vector<dlib::vector<int, 2>> LandmarkVector;
 namespace {
 
     cv::Rect2i shape_bounding_box(full_object_detection shape, int start_index, int num_parts,
-                                  int max_y = 0, int max_x = 0) {
+                                  int max_y = 0, int max_x = 0, int padding = 0) {
         long tl_x = shape.part(start_index).x();
         long tl_y = shape.part(start_index).y();
         long br_x = shape.part(start_index).x();
@@ -61,10 +61,20 @@ namespace {
             br_y = MAX(br_y, point.y());
         }
 
+        tl_x = MAX(tl_x - padding, 0);
+        tl_y = MAX(tl_y - padding, 0);
+
+        br_x = MIN(br_x + padding, max_x);
+        br_y = MIN(br_y + padding, max_y);
+
+        long width = max_x > tl_x ? MIN(max_x - tl_x, br_x - tl_x + 1) : br_x - tl_x + 1;
+        long height = max_y > tl_y ? MIN(max_y - tl_y, br_y - tl_y + 1) : br_y - tl_y + 1;
+
         cv::Rect2i bbox(tl_x,
                         tl_y,
-                        max_x > tl_x ? MIN(max_x - tl_x, br_x - tl_x + 1) : br_x - tl_x + 1,
-                        max_y > tl_y ? MIN(max_y - tl_y, br_y - tl_y + 1) : br_y - tl_y + 1);
+                        width,
+                        height);
+
         return bbox;
     }
 
@@ -99,12 +109,12 @@ namespace {
         LandmarkVector from_pts = LandmarkMatrix_to_LandmarkVector(reference_pts, start_index, num_parts);
         LandmarkVector to_pts = LandmarkMatrix_to_LandmarkVector(source_pts, start_index, num_parts);
 
-        cout << "From pts: " << from_pts.at(0) << ", " << from_pts.at(1) << endl;
-        cout << "To pts:   " << to_pts.at(0) << ", " << to_pts.at(1) << endl;
+        //cout << "From pts: " << from_pts.at(0) << ", " << from_pts.at(1) << endl;
+        //cout << "To pts:   " << to_pts.at(0) << ", " << to_pts.at(1) << endl;
 
         dlib::point_transform_affine trans = dlib::find_affine_transform(from_pts, to_pts);
 
-#if 1
+#if 0
         dlib::transform_image(dlibsource,
                               dlibdestination,
                               dlib::interpolate_quadratic(),
@@ -128,10 +138,34 @@ namespace {
         //return dlib::toMat(dlibdestination);
     }
 
-    std::pair<LandmarkMatrix, cv::Mat> crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts) {
+    float landmark_deviation(LandmarkMatrix a, LandmarkMatrix b, int start_index, int num_parts) {
+        LandmarkVector from_pts = LandmarkMatrix_to_LandmarkVector(a, start_index, num_parts);
+        LandmarkVector to_pts = LandmarkMatrix_to_LandmarkVector(b, start_index, num_parts);
+
+        dlib::point_transform_affine transform = dlib::find_similarity_transform(from_pts, to_pts);
+
+        float mse = 0.0;
+
+        for (int i = 0; i < from_pts.size(); ++i) {
+            auto from_trans = transform(from_pts.at(i));
+
+            auto diff = from_trans - to_pts.at(i);
+            //double x_dev = from_trans(0) - to_pts(i, 0);
+            //double y_dev = from_trans(1) - to_pts(i, 1);
+
+            mse += diff(0) * diff(0) + diff(1) * diff(1);
+            // mse += x_dev * x_dev + y_dev * y_dev;
+        }
+
+        mse /= num_parts;
+
+        return mse;
+    }
+
+    std::pair<LandmarkMatrix, cv::Mat> crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts, int padding) {
         // crop source to polygon defined by points shape.parts(start_index) through shape.parts(end_index)
 
-        cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols);
+        cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols, padding);
         cout << "Bounding box: " << bbox << endl;
 
         cv::Mat roi = source(bbox);
@@ -221,7 +255,7 @@ int main(int argc, char** argv) {
 
             cvmouths_mem.emplace_back();
 
-            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS);
+            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS, 10);
             cv::cvtColor(cvmouth.second, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
 
             cvmouths.emplace_back(cvmouth.first, cvmouths_mem.back());
@@ -270,32 +304,51 @@ int main(int argc, char** argv) {
 
                 for (unsigned long i = 0; i < faces.size(); ++i) {
                     auto shape = pose_model(cimg, faces[i]);
-                    draw_shape(temp, shape, OUTER_LIP_START, NUM_LIP_POINTS);
+                    // draw_shape(temp, shape, OUTER_LIP_START, NUM_LIP_POINTS);
 
                     auto landmarks = shape_to_points(shape);
                     shapes.push_back(landmarks);
 
-                    const std::pair<LandmarkMatrix, cv::Mat>& matching_mouth = cvmouths.at(0);
+                    int best_candidate = -1;
+                    float lowest_mse = 999999;
+
+                    for (int i = 0; i < cvmouths.size(); ++i) {
+                        float mse = landmark_deviation(cvmouths.at(i).first, landmarks, OUTER_LIP_START, NUM_LIP_POINTS);
+
+                        if (mse < lowest_mse) {
+                            lowest_mse = mse;
+                            best_candidate = i;
+                        }
+
+                        cout << "Deviation: " << mse << endl;
+                    }
+
+                    if (best_candidate >= 0) {
+                        const std::pair<LandmarkMatrix, cv::Mat> &matching_mouth = cvmouths.at(best_candidate);
 
 #if 0
-                    const cv::Rect2i dst_roi_bbox = shape_bounding_box(shape, OUTER_LIP_START, NUM_LIP_POINTS, temp.rows, temp.cols);
-                    cv::Mat dst_roi = temp(dst_roi_bbox);
-                    cv::Size dst_size(dst_roi.cols, dst_roi.rows);
-                    cv::imshow("dest", dst_roi);
+                        const cv::Rect2i dst_roi_bbox = shape_bounding_box(shape, OUTER_LIP_START, NUM_LIP_POINTS, temp.rows, temp.cols);
+                        cv::Mat dst_roi = temp(dst_roi_bbox);
+                        cv::Size dst_size(dst_roi.cols, dst_roi.rows);
+                        cv::imshow("dest", dst_roi);
 
-                    cv::Mat matching_mouth_resized;
-                    cv::resize(matching_mouth.second, matching_mouth_resized, dst_size);
-                    matching_mouth_resized.copyTo(dst_roi);
-                    cv::imshow("matching mouth", matching_mouth_resized);
+                        cv::Mat matching_mouth_resized;
+                        cv::resize(matching_mouth.second, matching_mouth_resized, dst_size);
+                        matching_mouth_resized.copyTo(dst_roi);
+                        cv::imshow("matching mouth", matching_mouth_resized);
 #else
-                    //cv::imshow("matching mouth", matching_mouth.second);
+                        //cv::imshow("matching mouth", matching_mouth.second);
 
 
-                    //cv::Mat matching_mouth_transformed(temp.rows, temp.cols, temp.type());
-                    //cv::Mat matching_mouth_transformed =
-                    transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, temp, OUTER_LIP_START, NUM_LIP_POINTS);
-                    //cv::imshow("matching mouth transformed", matching_mouth_transformed);
+                        //cv::Mat matching_mouth_transformed(temp.rows, temp.cols, temp.type());
+                        //cv::Mat matching_mouth_transformed =
+                        transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, temp,
+                                            OUTER_LIP_START, NUM_LIP_POINTS);
+                        //cv::imshow("matching mouth transformed", matching_mouth_transformed);
 #endif
+                    } else {
+                        cout << "No candidate face parts!" << endl;
+                    }
                 }
 
             } else if (num_frames_no_detection < MAX_STALE_FACE_FRAMES) {
