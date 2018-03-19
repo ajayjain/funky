@@ -1,18 +1,5 @@
-// The contents of this file are in the public domain. See LICENSE_FOR_EXAMPLE_PROGRAMS.txt
 /*
-
-    This example program shows how to find frontal human faces in an image and
-    estimate their pose.  The pose takes the form of 68 landmarks.  These are
-    points on the face such as the corners of the mouth, along the eyebrows, on
-    the eyes, and so forth.  
-    
-
-    This example is essentially just a version of the face_landmark_detection_ex.cpp
-    example modified to use OpenCV's VideoCapture object to read from a camera instead 
-    of files.
-
-
-    Finally, note that the face detector is fastest when compiled with at least
+    Note that the face detector is fastest when compiled with at least
     SSE2 instructions enabled.  So if you are using a PC with an Intel or AMD
     chip then you should enable at least SSE2 instructions.  If you are using
     cmake to compile this program you can enable them by using one of the
@@ -27,17 +14,22 @@
     2011.  SSE4 is the next fastest and is supported by most current machines.  
 */
 
+#include <iostream>
+#include <unordered_map>
+#include <vector>
+
 #include <dlib/opencv.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <dlib/image_processing/frontal_face_detector.h>
 #include <dlib/image_processing/render_face_detections.h>
 #include <dlib/image_processing.h>
+#include <dlib/geometry/point_transforms.h>
+#include <dlib/geometry.h>
+#include <dlib/image_transforms.h>
 #include <dlib/image_io.h>
 #include <dlib/gui_widgets.h>
 #include <eigen3/Eigen/Core>
-
-#include <iostream>
 
 using namespace dlib;
 using namespace std;
@@ -48,6 +40,8 @@ constexpr int NUM_LANDMARKS = 68;
 constexpr int OUTER_LIP_START = 49;
 constexpr int NUM_OUTER_LIP_POINTS = 59 - OUTER_LIP_START + 2;
 constexpr int NUM_LIP_POINTS = 67 - OUTER_LIP_START + 1;
+
+typedef Eigen::MatrixX2i LandmarkMatrix;
 
 namespace {
 
@@ -73,8 +67,8 @@ namespace {
         return bbox;
     }
 
-    Eigen::Matrix2Xi shape_to_points(full_object_detection shape) {
-        Eigen::Matrix2Xi points(shape.num_parts(), 2);
+    Eigen::MatrixX2i shape_to_points(full_object_detection shape) {
+        Eigen::MatrixX2i points(shape.num_parts(), 2);
 
         for (unsigned long i = 0; i < shape.num_parts(); ++i) {
             points(i, 0) = shape.part(i).x();
@@ -82,6 +76,43 @@ namespace {
         }
 
         return points;
+    }
+
+    cv::Mat transform_by_points(LandmarkMatrix reference_pts, LandmarkMatrix source_pts, cv::Mat source, long dest_rows, long dest_cols, int start_index, int num_parts) {
+        array2d<rgb_pixel> dlibsource;
+        dlib::assign_image(dlibsource, cv_image<bgr_pixel>(source));
+
+        array2d<rgb_pixel> dlibdestination(dest_rows, dest_cols);
+        // dlib::assign_image(dlibdestination, cv_image<bgr_pixel>(dest));
+        //cv_image<rgb_pixel> dlibsource(source);
+        //cv_image<rgb_pixel> dlibdestination(dest);
+
+        int l = reference_pts.col(0).minCoeff();
+        int r = reference_pts.col(0).maxCoeff();
+        int t = reference_pts.col(1).minCoeff();
+        int b = reference_pts.col(1).maxCoeff();
+        dlib::rectangle dest_area(l, t, r, b);
+
+        // TODO: Actually compute a transformation matrix
+        // dlib::point_transform_affine trans(R, -R*dcenter(get_rect(out_img)) + dcenter(rimg));
+        dlib::point_transform_affine trans;
+
+#if 1
+        dlib::transform_image(dlibsource,
+                              dlibdestination,
+                              dlib::interpolate_quadratic(),
+                              trans,
+                              dlib::no_background());
+#else
+        dlib::transform_image(dlibsource,
+                              dlibdestination,
+                              dlib::interpolate_quadratic(),
+                              trans,
+                              dlib::no_background(),
+                              dest_area);
+#endif
+
+        return dlib::toMat(dlibdestination);
     }
 
     cv::Mat crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts) {
@@ -139,7 +170,8 @@ int main(int argc, char** argv) {
     shape_predictor pose_model;
     deserialize(argv[1]) >> pose_model;
 
-    std::vector<cv::Mat> cvmouths;
+    std::vector<cv::Mat> cvmouths_mem;
+    std::vector<std::pair<LandmarkMatrix, cv::Mat>> cvmouths;
 
     // Load image and extract face parts
     for (int i = 3; i < argc; ++i) {
@@ -162,10 +194,15 @@ int main(int argc, char** argv) {
             cout << "pixel position of first part:  " << shape.part(0) << endl;
             cout << "pixel position of second part: " << shape.part(1) << endl;
 
+            // Convert face shape into X by 2 matrix
+            LandmarkMatrix landmarks = shape_to_points(shape);
+
+            cvmouths_mem.emplace_back();
+
             cv::Mat cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS);
-            cv::cvtColor(cvmouth, cvmouth, cv::COLOR_BGR2RGB);
-            cvmouths.emplace_back();
-            cvmouth.copyTo(cvmouths.back());
+            cv::cvtColor(cvmouth, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
+
+            cvmouths.emplace_back(landmarks, cvmouths_mem.back());
         }
     }
 
@@ -177,16 +214,14 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        std::vector<Eigen::Matrix2Xi> shapes;
+        std::vector<Eigen::MatrixX2i> shapes;
         int num_frames_no_detection = 0;
-
-        // Grab and process frames until the main window is closed by the user.
-        //image_window win;
 
         cv::namedWindow("camera canvas", cv::WINDOW_AUTOSIZE);
         cv::namedWindow("matching mouth", cv::WINDOW_AUTOSIZE);
-        cv::namedWindow("dest", cv::WINDOW_AUTOSIZE);
+        cv::namedWindow("matching mouth transformed", cv::WINDOW_AUTOSIZE);
 
+        // Grab and process frames in a loop.
         while(true) {
             // Grab a frame
             cv::Mat temp;
@@ -213,23 +248,31 @@ int main(int argc, char** argv) {
 
                 for (unsigned long i = 0; i < faces.size(); ++i) {
                     auto shape = pose_model(cimg, faces[i]);
-                    auto landmarks = shape_to_points(shape);
-
                     draw_shape(temp, shape, OUTER_LIP_START, NUM_LIP_POINTS);
 
+                    auto landmarks = shape_to_points(shape);
                     shapes.push_back(landmarks);
 
+                    const std::pair<LandmarkMatrix, cv::Mat>& matching_mouth = cvmouths.at(0);
+
+#if 0
                     const cv::Rect2i dst_roi_bbox = shape_bounding_box(shape, OUTER_LIP_START, NUM_LIP_POINTS, temp.rows, temp.cols);
                     cv::Mat dst_roi = temp(dst_roi_bbox);
+                    cv::Size dst_size(dst_roi.cols, dst_roi.rows);
                     cv::imshow("dest", dst_roi);
 
-                    cv::Size dst_size(dst_roi.cols, dst_roi.rows);
-
-                    const cv::Mat& matching_mouth = cvmouths.at(0);
                     cv::Mat matching_mouth_resized;
-                    cv::resize(matching_mouth, matching_mouth_resized, dst_size);
+                    cv::resize(matching_mouth.second, matching_mouth_resized, dst_size);
                     matching_mouth_resized.copyTo(dst_roi);
                     cv::imshow("matching mouth", matching_mouth_resized);
+#else
+                    //cv::imshow("matching mouth", matching_mouth.second);
+
+
+                    //cv::Mat matching_mouth_transformed(temp.rows, temp.cols, temp.type());
+                    cv::Mat matching_mouth_transformed = transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, temp.rows, temp.cols, OUTER_LIP_START, NUM_LIP_POINTS);
+                    cv::imshow("matching mouth transformed", matching_mouth_transformed);
+#endif
                 }
 
             } else if (num_frames_no_detection < MAX_STALE_FACE_FRAMES) {
