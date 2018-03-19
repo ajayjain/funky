@@ -78,14 +78,15 @@ namespace {
         return points;
     }
 
-    cv::Mat transform_by_points(LandmarkMatrix reference_pts, LandmarkMatrix source_pts, cv::Mat source, long dest_rows, long dest_cols, int start_index, int num_parts) {
-        array2d<rgb_pixel> dlibsource;
-        dlib::assign_image(dlibsource, cv_image<bgr_pixel>(source));
+    void transform_by_points(LandmarkMatrix reference_pts, LandmarkMatrix source_pts, cv::Mat source, cv::Mat dest, int start_index, int num_parts) {
+        //array2d<bgr_pixel> dlibsource;
+        //dlib::assign_image(dlibsource, cv_image<bgr_pixel>(source));
 
-        array2d<rgb_pixel> dlibdestination(dest_rows, dest_cols);
-        // dlib::assign_image(dlibdestination, cv_image<bgr_pixel>(dest));
-        //cv_image<rgb_pixel> dlibsource(source);
-        //cv_image<rgb_pixel> dlibdestination(dest);
+        //array2d<rgb_pixel> dlibdestination(dest.rows, dest.cols);
+        //dlib::assign_image(dlibdestination, cv_image<bgr_pixel>(dest));
+
+        cv_image<bgr_pixel> dlibsource(source);
+        cv_image<bgr_pixel> dlibdestination(dest);
 
         int l = reference_pts.col(0).minCoeff();
         int r = reference_pts.col(0).maxCoeff();
@@ -112,7 +113,7 @@ namespace {
                               dest_area);
 #endif
 
-        return dlib::toMat(dlibdestination);
+        //return dlib::toMat(dlibdestination);
     }
 
     cv::Mat crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts) {
@@ -270,8 +271,9 @@ int main(int argc, char** argv) {
 
 
                     //cv::Mat matching_mouth_transformed(temp.rows, temp.cols, temp.type());
-                    cv::Mat matching_mouth_transformed = transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, temp.rows, temp.cols, OUTER_LIP_START, NUM_LIP_POINTS);
-                    cv::imshow("matching mouth transformed", matching_mouth_transformed);
+                    //cv::Mat matching_mouth_transformed =
+                    transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, temp, OUTER_LIP_START, NUM_LIP_POINTS);
+                    //cv::imshow("matching mouth transformed", matching_mouth_transformed);
 #endif
                 }
 
