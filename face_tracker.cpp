@@ -42,6 +42,7 @@ constexpr int NUM_OUTER_LIP_POINTS = 59 - OUTER_LIP_START + 2;
 constexpr int NUM_LIP_POINTS = 67 - OUTER_LIP_START + 1;
 
 typedef Eigen::MatrixX2i LandmarkMatrix;
+typedef std::vector<dlib::vector<int, 2>> LandmarkVector;
 
 namespace {
 
@@ -78,25 +79,30 @@ namespace {
         return points;
     }
 
+    LandmarkVector LandmarkMatrix_to_LandmarkVector(LandmarkMatrix pts, int start_index, int num_parts) {
+        LandmarkVector vec;
+
+        for (int r = start_index; r < start_index + num_parts; ++r) {
+            dlib::vector<int, 2> pt;
+            pt(0) = pts(r, 0);
+            pt(1) = pts(r, 1);
+            vec.push_back(pt);
+        }
+
+        return vec;
+    }
+
     void transform_by_points(LandmarkMatrix reference_pts, LandmarkMatrix source_pts, cv::Mat source, cv::Mat dest, int start_index, int num_parts) {
-        //array2d<bgr_pixel> dlibsource;
-        //dlib::assign_image(dlibsource, cv_image<bgr_pixel>(source));
-
-        //array2d<rgb_pixel> dlibdestination(dest.rows, dest.cols);
-        //dlib::assign_image(dlibdestination, cv_image<bgr_pixel>(dest));
-
         cv_image<bgr_pixel> dlibsource(source);
         cv_image<bgr_pixel> dlibdestination(dest);
 
-        int l = reference_pts.col(0).minCoeff();
-        int r = reference_pts.col(0).maxCoeff();
-        int t = reference_pts.col(1).minCoeff();
-        int b = reference_pts.col(1).maxCoeff();
-        dlib::rectangle dest_area(l, t, r, b);
+        LandmarkVector from_pts = LandmarkMatrix_to_LandmarkVector(reference_pts, start_index, num_parts);
+        LandmarkVector to_pts = LandmarkMatrix_to_LandmarkVector(source_pts, start_index, num_parts);
 
-        // TODO: Actually compute a transformation matrix
-        // dlib::point_transform_affine trans(R, -R*dcenter(get_rect(out_img)) + dcenter(rimg));
-        dlib::point_transform_affine trans;
+        cout << "From pts: " << from_pts.at(0) << ", " << from_pts.at(1) << endl;
+        cout << "To pts:   " << to_pts.at(0) << ", " << to_pts.at(1) << endl;
+
+        dlib::point_transform_affine trans = dlib::find_affine_transform(from_pts, to_pts);
 
 #if 1
         dlib::transform_image(dlibsource,
@@ -105,6 +111,12 @@ namespace {
                               trans,
                               dlib::no_background());
 #else
+        int l = reference_pts.col(0).minCoeff();
+        int r = reference_pts.col(0).maxCoeff();
+        int t = reference_pts.col(1).minCoeff();
+        int b = reference_pts.col(1).maxCoeff();
+        dlib::rectangle dest_area(l, t, r, b);
+
         dlib::transform_image(dlibsource,
                               dlibdestination,
                               dlib::interpolate_quadratic(),
@@ -116,7 +128,7 @@ namespace {
         //return dlib::toMat(dlibdestination);
     }
 
-    cv::Mat crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts) {
+    std::pair<LandmarkMatrix, cv::Mat> crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts) {
         // crop source to polygon defined by points shape.parts(start_index) through shape.parts(end_index)
 
         cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols);
@@ -124,6 +136,11 @@ namespace {
 
         cv::Mat roi = source(bbox);
 
+        LandmarkMatrix polygon(shape.num_parts(), 2);
+        for (int i = 0; i < shape.num_parts(); ++i) {
+            polygon(i, 0) = shape.part(i).x() - bbox.x;
+            polygon(i, 1) = shape.part(i).y() - bbox.y;
+        }
 #if 0
         // Translate shape points into frame
         std::vector<cv::Point2i> polygon(num_parts);
@@ -146,7 +163,10 @@ namespace {
 
         return roi_masked;
 #else
-        return roi;
+        std::pair<LandmarkMatrix, cv::Mat> landmarks_and_roi(polygon, roi);
+        return landmarks_and_roi;
+
+        // return std::make_pair<LandmarkMatrix, cv::Mat>(polygon, roi);
 #endif
     }
 
@@ -171,7 +191,8 @@ int main(int argc, char** argv) {
     shape_predictor pose_model;
     deserialize(argv[1]) >> pose_model;
 
-    std::vector<cv::Mat> cvmouths_mem;
+    std::vector<cv::Mat> cvmouths_mem; // Buffer where we can store matrices such that they won't be deallocated after
+                                       // locals go out of scope in the loops below
     std::vector<std::pair<LandmarkMatrix, cv::Mat>> cvmouths;
 
     // Load image and extract face parts
@@ -196,14 +217,14 @@ int main(int argc, char** argv) {
             cout << "pixel position of second part: " << shape.part(1) << endl;
 
             // Convert face shape into X by 2 matrix
-            LandmarkMatrix landmarks = shape_to_points(shape);
+            // LandmarkMatrix landmarks = shape_to_points(shape);
 
             cvmouths_mem.emplace_back();
 
-            cv::Mat cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS);
-            cv::cvtColor(cvmouth, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
+            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS);
+            cv::cvtColor(cvmouth.second, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
 
-            cvmouths.emplace_back(landmarks, cvmouths_mem.back());
+            cvmouths.emplace_back(cvmouth.first, cvmouths_mem.back());
         }
     }
 
