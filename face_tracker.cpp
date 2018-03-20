@@ -210,7 +210,7 @@ namespace {
         // Create vector of points for hull
         // Find the center of the polygon, so we can displace bounds outward to add padding
         cv::Point2i polygon[num_parts];
-        //cv::Point2i polygon_center(0, 0);
+        cv::Point2i polygon_center(0, 0);
         for (int i = 0; i < num_parts; ++i) {
             int x = shape.part(start_index + i).x();
             int y = shape.part(start_index + i).y();
@@ -218,18 +218,17 @@ namespace {
             polygon[i].x = x;
             polygon[i].y = y;
 
-            //polygon_center.x += x;
-            //polygon_center.y += y;
+            polygon_center.x += x;
+            polygon_center.y += y;
         }
-        //polygon_center.x /= (float) num_parts;
-        //polygon_center.y /= (float) num_parts;
+        polygon_center.x /= (float) num_parts;
+        polygon_center.y /= (float) num_parts;
 
         // Displace polygon vertices outward
-        //for (int i = 0; i < num_parts; ++i) {
-        //    auto vertex = polygon.at(i);
-        //    auto displacement = vertex - polygon_center;
-        //    polygon[i] = vertex + displacement * padding;
-        //}
+        for (int i = 0; i < num_parts; ++i) {
+            const auto displacement = polygon[i] - polygon_center;
+            polygon[i] = polygon[i] + displacement * padding;
+        }
 
         // Copy only pixels within polygon
         cv::Mat mask = cv::Mat::zeros(source.rows, source.cols, CV_8UC1);
@@ -305,14 +304,11 @@ int main(int argc, char** argv) {
         // each face we detected.
         for (unsigned long j = 0; j < dets.size(); ++j) {
             full_object_detection shape = pose_model(img, dets[j]);
-            cout << "number of parts: "<< shape.num_parts() << endl;
-            cout << "pixel position of first part:  " << shape.part(0) << endl;
-            cout << "pixel position of second part: " << shape.part(1) << endl;
 
             // Convert face shape into X by 2 matrix
             cvmouths_mem.emplace_back();
 
-            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS, 1.0);
+            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS, 0.5);
             cv::cvtColor(cvmouth.second, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
 
             cvmouths.emplace_back(cvmouth.first, cvmouths_mem.back());
