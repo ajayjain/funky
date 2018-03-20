@@ -37,14 +37,20 @@ using namespace std;
 // Hold detected face shapes for this many frames.
 constexpr int MAX_STALE_FACE_FRAMES = 3;
 constexpr int NUM_LANDMARKS = 68;
-constexpr int OUTER_LIP_START = 49;
-constexpr int NUM_OUTER_LIP_POINTS = 59 - OUTER_LIP_START + 2;
+
+constexpr int LEFT_EYE_START = 36;
+constexpr int NUM_EYE_POINTS = 6;
+
+constexpr int OUTER_LIP_START = 48;
+constexpr int NUM_OUTER_LIP_POINTS = 59 - OUTER_LIP_START + 1;
 constexpr int NUM_LIP_POINTS = 67 - OUTER_LIP_START + 1;
 
 typedef Eigen::MatrixX2i LandmarkMatrix;
+typedef std::pair<LandmarkMatrix, cv::Mat> FeaturePair;
 
 template<class T>
 using LandmarkVector = std::vector<dlib::vector<T, 2>>;
+
 
 //typedef std::vector<dlib::vector<int, 2>> LandmarkVector;
 
@@ -172,27 +178,6 @@ namespace {
 
 
 #if 0
-        // Translate shape points into frame
-        std::vector<cv::Point2i> polygon(num_parts);
-        for (unsigned long i = start_index; i < start_index + num_parts; ++i) {
-            polygon.emplace_back(
-                    (int) shape.part(i).x() - bbox.x,
-                    (int) shape.part(i).y() - bbox.y);
-        }
-
-        // Copy only pixels within polygon
-        cv::Mat mask = cv::Mat::zeros(roi.rows, roi.cols, CV_8U);
-        cv::fillConvexPoly(mask, polygon.data(), num_parts, cv::Scalar(255));
-        cv::Mat roi_masked;
-        roi.copyTo(roi_masked, mask);
-
-        cv::namedWindow("mask", cv::WINDOW_AUTOSIZE);
-        cv::imshow("mask", mask);
-
-        dlib::sleep(2000);
-
-        return roi_masked;
-#elif 0
         cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols, padding);
         cout << "Bounding box: " << bbox << endl;
 
@@ -249,12 +234,26 @@ namespace {
         }
     }
 
-    cv::Mat blend(const cv::Mat overlay, const cv::Mat source) {
+    cv::Mat blend_max(const cv::Mat& overlay, const cv::Mat& source) {
         assert(overlay.rows == source.rows && overlay.cols == source.cols);
-
-#if 1
         return cv::max(overlay, source);
-#else
+    }
+
+    cv::Mat blend_add(const cv::Mat& overlay, const cv::Mat& source) {
+        assert(overlay.rows == source.rows && overlay.cols == source.cols);
+        cv::Mat dst(source.rows, source.cols, source.type());
+        cv::add(overlay, source, dst);
+        return dst;
+    }
+
+    cv::Mat blend_multiply(const cv::Mat& overlay, const cv::Mat& source) {
+        assert(overlay.rows == source.rows && overlay.cols == source.cols);
+        cv::Mat dst(source.rows, source.cols, source.type());
+        cv::multiply(overlay, source, dst);
+        return dst;
+    }
+
+#if 0
         cv::Mat out(source.rows, source.cols, source.type());
         for (int r = 0; r < overlay.rows; ++r) {
             for (int c = 0; c < overlay.cols; ++c) {
@@ -267,6 +266,63 @@ namespace {
         }
         return out;
 #endif
+                    //const std::vector<FeaturePair>& feature_pairs = cvleyes;
+                    //const int landmark_start_index = LEFT_EYE_START;
+                    //const int landmark_count = NUM_EYE_POINTS;
+                    //const cv::Mat& dest_frame = temp;
+
+    int find_closest_feature(const LandmarkMatrix& source_landmarks,
+                             const std::vector<FeaturePair>& candidate_pairs,
+                             const int landmark_start_index,
+                             const int landmark_count) {
+        int best_candidate = -1;
+        float lowest_mse = 9999999;
+
+        for (int i = 0; i < candidate_pairs.size(); ++i) {
+            float mse = landmark_deviation(candidate_pairs.at(i).first,
+                                           source_landmarks,
+                                           landmark_start_index,
+                                           landmark_count);
+
+            if (mse < lowest_mse) {
+                lowest_mse = mse;
+                best_candidate = i;
+            }
+
+            cout << "  Deviation (MSE): " << mse << endl;
+        }
+
+        return best_candidate;
+    }
+
+    void blend_closest_feature(const LandmarkMatrix& source_landmarks,
+                               const std::vector<FeaturePair>& candidate_pairs,
+                               const int landmark_start_index,
+                               const int landmark_count,
+                               cv::Mat (*blend_fn)(const cv::Mat&, const cv::Mat&),
+                               cv::Mat& dest) {
+        int best_candidate =
+                find_closest_feature(source_landmarks, candidate_pairs, landmark_start_index, landmark_count);
+
+        if (best_candidate >= 0) {
+            const auto& matching_feature_pair =
+                    candidate_pairs.at(best_candidate);
+
+            cv::Mat matching_feature_transformed =
+                    cv::Mat::zeros(dest.rows, dest.cols, dest.type());
+
+            transform_by_points(source_landmarks,
+                                matching_feature_pair.first,
+                                matching_feature_pair.second,
+                                matching_feature_transformed,
+                                landmark_start_index,
+                                landmark_count);
+
+            // TODO: Can we blend onto dest without the copy?
+            blend_fn(matching_feature_transformed, dest).copyTo(dest);
+        } else {
+            cout << "  No candidate parts!" << endl;
+        }
     }
 
 } // end anonymous namespace
@@ -287,6 +343,9 @@ int main(int argc, char** argv) {
                                        // locals go out of scope in the loops below
     std::vector<std::pair<LandmarkMatrix, cv::Mat>> cvmouths;
 
+    std::vector<cv::Mat> cvleyes_mem;
+    std::vector<std::pair<LandmarkMatrix, cv::Mat>> cvleyes;
+
     // Load image and extract face parts
     for (int i = 3; i < argc; ++i) {
         cout << "processing image " << argv[i] << endl;
@@ -305,13 +364,23 @@ int main(int argc, char** argv) {
         for (unsigned long j = 0; j < dets.size(); ++j) {
             full_object_detection shape = pose_model(img, dets[j]);
 
-            // Convert face shape into X by 2 matrix
-            cvmouths_mem.emplace_back();
+            // Copy mouth
+            {
+                cvmouths_mem.emplace_back();
+                std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START,
+                                                                             NUM_OUTER_LIP_POINTS, 0.5);
+                cv::cvtColor(cvmouth.second, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
+                cvmouths.emplace_back(cvmouth.first, cvmouths_mem.back());
+            }
 
-            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS, 0.5);
-            cv::cvtColor(cvmouth.second, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
-
-            cvmouths.emplace_back(cvmouth.first, cvmouths_mem.back());
+            // Copy left eye
+            {
+                cvleyes_mem.emplace_back();
+                std::pair<LandmarkMatrix, cv::Mat> leye =
+                        crop_to_polygon(img_mat, shape, LEFT_EYE_START, NUM_EYE_POINTS, 0.5);
+                cv::cvtColor(leye.second, cvleyes_mem.back(), cv::COLOR_BGR2RGB);
+                cvleyes.emplace_back(leye.first, cvleyes_mem.back());
+            }
         }
     }
 
@@ -323,12 +392,10 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        std::vector<Eigen::MatrixX2i> shapes;
+        //std::vector<Eigen::MatrixX2i> landmark_shapes;
         int num_frames_no_detection = 0;
 
-        cv::namedWindow("camera canvas", cv::WINDOW_AUTOSIZE);
-        //cv::namedWindow("matching mouth", cv::WINDOW_AUTOSIZE);
-        //cv::namedWindow("matching mouth transformed", cv::WINDOW_AUTOSIZE);
+        cv::namedWindow("Synchronicity", cv::WINDOW_AUTOSIZE);
 
         // Grab and process frames in a loop.
         while(true) {
@@ -349,72 +416,38 @@ int main(int argc, char** argv) {
             // Detect faces 
             std::vector<rectangle> faces = detector(cimg);
 
-            // Find the pose of each face.
             cout << "Detected " << faces.size() << " faces" << endl;
-            if (faces.size() > 0) {
-                shapes.clear();
-                num_frames_no_detection = 0;
 
-                for (unsigned long i = 0; i < faces.size(); ++i) {
-                    auto shape = pose_model(cimg, faces[i]);
-                    // draw_shape(temp, shape, OUTER_LIP_START, NUM_LIP_POINTS);
+            //if (faces.size() > 0) {
+                //landmark_shapes.clear();
+                //num_frames_no_detection = 0;
 
-                    auto landmarks = shape_to_points(shape);
-                    shapes.push_back(landmarks);
+            // Apply overlays to each face
+            for (unsigned long i = 0; i < faces.size(); ++i) {
+                auto shape = pose_model(cimg, faces[i]);
+                auto landmarks = shape_to_points(shape);
+                //landmark_shapes.push_back(landmarks);
 
-                    int best_candidate = -1;
-                    float lowest_mse = 999999;
+                // Match mouth
+                cout << "Matching mouth" << endl;
+                blend_closest_feature(landmarks, cvmouths, OUTER_LIP_START, NUM_LIP_POINTS, blend_add, temp);
 
-                    for (int i = 0; i < cvmouths.size(); ++i) {
-                        float mse = landmark_deviation(cvmouths.at(i).first, landmarks, OUTER_LIP_START, NUM_LIP_POINTS);
+//                draw_shape(temp, shape, OUTER_LIP_START, NUM_LIP_POINTS);
 
-                        if (mse < lowest_mse) {
-                            lowest_mse = mse;
-                            best_candidate = i;
-                        }
-
-                        cout << "Deviation: " << mse << endl;
-                    }
-
-                    if (best_candidate >= 0) {
-                        const std::pair<LandmarkMatrix, cv::Mat> &matching_mouth = cvmouths.at(best_candidate);
-
-#if 0
-                        const cv::Rect2i dst_roi_bbox = shape_bounding_box(shape, OUTER_LIP_START, NUM_LIP_POINTS, temp.rows, temp.cols);
-                        cv::Mat dst_roi = temp(dst_roi_bbox);
-                        cv::Size dst_size(dst_roi.cols, dst_roi.rows);
-                        cv::imshow("dest", dst_roi);
-
-                        cv::Mat matching_mouth_resized;
-                        cv::resize(matching_mouth.second, matching_mouth_resized, dst_size);
-                        matching_mouth_resized.copyTo(dst_roi);
-                        cv::imshow("matching mouth", matching_mouth_resized);
-#else
-                        //cv::imshow("matching mouth", matching_mouth.second);
-
-
-                        cv::Mat matching_mouth_transformed = cv::Mat::zeros(temp.rows, temp.cols, temp.type());
-                        transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, matching_mouth_transformed,
-                                            OUTER_LIP_START, NUM_LIP_POINTS);
-                        temp = blend(matching_mouth_transformed, temp);
-                        // temp = matching_mouth_transformed;
-                        //cv::imshow("matching mouth transformed", matching_mouth_transformed);
-#endif
-                    } else {
-                        cout << "No candidate face parts!" << endl;
-                    }
-                }
-
-            } else if (num_frames_no_detection < MAX_STALE_FACE_FRAMES) {
-                num_frames_no_detection++;
-            } else {
-                shapes.clear();
-                num_frames_no_detection++;
+                // Match left eye
+                cout << "Matching left eye" << endl;
+                blend_closest_feature(landmarks, cvleyes, LEFT_EYE_START, NUM_EYE_POINTS, blend_add, temp);
             }
 
-            // Display it all on the screen
+            //} else if (num_frames_no_detection < MAX_STALE_FACE_FRAMES) {
+            //    num_frames_no_detection++;
+            //} else {
+            //    //landmark_shapes.clear();
+            //    num_frames_no_detection++;
+            //}
 
-            cv::imshow("camera canvas", temp);
+            // Display it all on the screen
+            cv::imshow("Synchronicity", temp);
             cv::waitKey(20);
         }
     } catch(serialization_error& e) {
