@@ -42,12 +42,16 @@ constexpr int NUM_OUTER_LIP_POINTS = 59 - OUTER_LIP_START + 2;
 constexpr int NUM_LIP_POINTS = 67 - OUTER_LIP_START + 1;
 
 typedef Eigen::MatrixX2i LandmarkMatrix;
-typedef std::vector<dlib::vector<int, 2>> LandmarkVector;
+
+template<class T>
+using LandmarkVector = std::vector<dlib::vector<T, 2>>;
+
+//typedef std::vector<dlib::vector<int, 2>> LandmarkVector;
 
 namespace {
 
     cv::Rect2i shape_bounding_box(full_object_detection shape, int start_index, int num_parts,
-                                  int max_y = 0, int max_x = 0, int padding = 0) {
+                                  int max_y = 0, int max_x = 0, float padding = 0) {
         long tl_x = shape.part(start_index).x();
         long tl_y = shape.part(start_index).y();
         long br_x = shape.part(start_index).x();
@@ -61,11 +65,11 @@ namespace {
             br_y = MAX(br_y, point.y());
         }
 
-        tl_x = MAX(tl_x - padding, 0);
-        tl_y = MAX(tl_y - padding, 0);
+        tl_x = MAX(tl_x - 50 * padding, 0);
+        tl_y = MAX(tl_y - 50 * padding, 0);
 
-        br_x = MIN(br_x + padding, max_x);
-        br_y = MIN(br_y + padding, max_y);
+        br_x = MIN(br_x + 50 * padding, max_x);
+        br_y = MIN(br_y + 50 * padding, max_y);
 
         long width = max_x > tl_x ? MIN(max_x - tl_x, br_x - tl_x + 1) : br_x - tl_x + 1;
         long height = max_y > tl_y ? MIN(max_y - tl_y, br_y - tl_y + 1) : br_y - tl_y + 1;
@@ -78,8 +82,8 @@ namespace {
         return bbox;
     }
 
-    Eigen::MatrixX2i shape_to_points(full_object_detection shape) {
-        Eigen::MatrixX2i points(shape.num_parts(), 2);
+    LandmarkMatrix shape_to_points(full_object_detection shape) {
+        LandmarkMatrix points(shape.num_parts(), 2);
 
         for (unsigned long i = 0; i < shape.num_parts(); ++i) {
             points(i, 0) = shape.part(i).x();
@@ -89,11 +93,12 @@ namespace {
         return points;
     }
 
-    LandmarkVector LandmarkMatrix_to_LandmarkVector(LandmarkMatrix pts, int start_index, int num_parts) {
-        LandmarkVector vec;
+    template<class T>
+    LandmarkVector<T> LandmarkMatrix_to_LandmarkVector(LandmarkMatrix pts, int start_index, int num_parts) {
+        LandmarkVector<T> vec;
 
         for (int r = start_index; r < start_index + num_parts; ++r) {
-            dlib::vector<int, 2> pt;
+            dlib::vector<T, 2> pt;
             pt(0) = pts(r, 0);
             pt(1) = pts(r, 1);
             vec.push_back(pt);
@@ -102,17 +107,17 @@ namespace {
         return vec;
     }
 
-    void transform_by_points(LandmarkMatrix reference_pts, LandmarkMatrix source_pts, cv::Mat source, cv::Mat dest, int start_index, int num_parts) {
-        cv_image<bgr_pixel> dlibsource(source);
+    void transform_by_points(LandmarkMatrix reference_pts, LandmarkMatrix source_pts, const cv::Mat source, cv::Mat dest, const int start_index, const int num_parts) {
+        const cv_image<bgr_pixel> dlibsource(source);
         cv_image<bgr_pixel> dlibdestination(dest);
 
-        LandmarkVector from_pts = LandmarkMatrix_to_LandmarkVector(reference_pts, start_index, num_parts);
-        LandmarkVector to_pts = LandmarkMatrix_to_LandmarkVector(source_pts, start_index, num_parts);
+        const LandmarkVector<double> from_pts = LandmarkMatrix_to_LandmarkVector<double>(reference_pts, start_index, num_parts);
+        const LandmarkVector<double> to_pts = LandmarkMatrix_to_LandmarkVector<double>(source_pts, start_index, num_parts);
 
         //cout << "From pts: " << from_pts.at(0) << ", " << from_pts.at(1) << endl;
         //cout << "To pts:   " << to_pts.at(0) << ", " << to_pts.at(1) << endl;
 
-        dlib::point_transform_affine trans = dlib::find_affine_transform(from_pts, to_pts);
+        const dlib::point_transform_projective trans = dlib::find_projective_transform(from_pts, to_pts);
 
 #if 0
         dlib::transform_image(dlibsource,
@@ -121,10 +126,10 @@ namespace {
                               trans,
                               dlib::no_background());
 #else
-        int l = reference_pts.col(0).minCoeff();
-        int r = reference_pts.col(0).maxCoeff();
-        int t = reference_pts.col(1).minCoeff();
-        int b = reference_pts.col(1).maxCoeff();
+        const int l = reference_pts.col(0).minCoeff();
+        const int r = reference_pts.col(0).maxCoeff();
+        const int t = reference_pts.col(1).minCoeff();
+        const int b = reference_pts.col(1).maxCoeff();
         dlib::rectangle dest_area(l, t, r, b);
 
         dlib::transform_image(dlibsource,
@@ -139,8 +144,8 @@ namespace {
     }
 
     float landmark_deviation(LandmarkMatrix a, LandmarkMatrix b, int start_index, int num_parts) {
-        LandmarkVector from_pts = LandmarkMatrix_to_LandmarkVector(a, start_index, num_parts);
-        LandmarkVector to_pts = LandmarkMatrix_to_LandmarkVector(b, start_index, num_parts);
+        LandmarkVector<int> from_pts = LandmarkMatrix_to_LandmarkVector<int>(a, start_index, num_parts);
+        LandmarkVector<int> to_pts = LandmarkMatrix_to_LandmarkVector<int>(b, start_index, num_parts);
 
         dlib::point_transform_affine transform = dlib::find_similarity_transform(from_pts, to_pts);
 
@@ -162,19 +167,10 @@ namespace {
         return mse;
     }
 
-    std::pair<LandmarkMatrix, cv::Mat> crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts, int padding) {
+    std::pair<LandmarkMatrix, cv::Mat> crop_to_polygon(cv::Mat source, full_object_detection shape, int start_index, int num_parts, float padding) {
         // crop source to polygon defined by points shape.parts(start_index) through shape.parts(end_index)
 
-        cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols, padding);
-        cout << "Bounding box: " << bbox << endl;
 
-        cv::Mat roi = source(bbox);
-
-        LandmarkMatrix polygon(shape.num_parts(), 2);
-        for (int i = 0; i < shape.num_parts(); ++i) {
-            polygon(i, 0) = shape.part(i).x() - bbox.x;
-            polygon(i, 1) = shape.part(i).y() - bbox.y;
-        }
 #if 0
         // Translate shape points into frame
         std::vector<cv::Point2i> polygon(num_parts);
@@ -196,11 +192,54 @@ namespace {
         dlib::sleep(2000);
 
         return roi_masked;
-#else
+#elif 0
+        cv::Rect2i bbox = shape_bounding_box(shape, start_index, num_parts, source.rows, source.cols, padding);
+        cout << "Bounding box: " << bbox << endl;
+
+        cv::Mat roi = source(bbox);
+
+        LandmarkMatrix polygon(shape.num_parts(), 2);
+        for (int i = 0; i < shape.num_parts(); ++i) {
+            polygon(i, 0) = shape.part(i).x() - bbox.x;
+            polygon(i, 1) = shape.part(i).y() - bbox.y;
+        }
+
         std::pair<LandmarkMatrix, cv::Mat> landmarks_and_roi(polygon, roi);
         return landmarks_and_roi;
+#else
+        // Create vector of points for hull
+        // Find the center of the polygon, so we can displace bounds outward to add padding
+        cv::Point2i polygon[num_parts];
+        //cv::Point2i polygon_center(0, 0);
+        for (int i = 0; i < num_parts; ++i) {
+            int x = shape.part(start_index + i).x();
+            int y = shape.part(start_index + i).y();
 
-        // return std::make_pair<LandmarkMatrix, cv::Mat>(polygon, roi);
+            polygon[i].x = x;
+            polygon[i].y = y;
+
+            //polygon_center.x += x;
+            //polygon_center.y += y;
+        }
+        //polygon_center.x /= (float) num_parts;
+        //polygon_center.y /= (float) num_parts;
+
+        // Displace polygon vertices outward
+        //for (int i = 0; i < num_parts; ++i) {
+        //    auto vertex = polygon.at(i);
+        //    auto displacement = vertex - polygon_center;
+        //    polygon[i] = vertex + displacement * padding;
+        //}
+
+        // Copy only pixels within polygon
+        cv::Mat mask = cv::Mat::zeros(source.rows, source.cols, CV_8UC1);
+        cv::fillConvexPoly(mask, polygon, num_parts, 255, 8, 0);
+        cv::Mat source_masked;
+        source.copyTo(source_masked, mask);
+
+        auto landmarks = shape_to_points(shape);
+        std::pair<LandmarkMatrix, cv::Mat> landmarks_and_roi(landmarks, source_masked);
+        return landmarks_and_roi;
 #endif
     }
 
@@ -209,6 +248,26 @@ namespace {
             cv::Point2l center(shape.part(i).x(), shape.part(i).y());
             cv::circle(canvas, center, 3, cv::Scalar(0x00ff00));
         }
+    }
+
+    cv::Mat blend(const cv::Mat overlay, const cv::Mat source) {
+        assert(overlay.rows == source.rows && overlay.cols == source.cols);
+
+#if 1
+        return cv::max(overlay, source);
+#else
+        cv::Mat out(source.rows, source.cols, source.type());
+        for (int r = 0; r < overlay.rows; ++r) {
+            for (int c = 0; c < overlay.cols; ++c) {
+                //if (overlay.at<int>(r, c) > 0) {
+                //    out.at<int>(r, c) = overlay.at<int>(r, c) * source.at<int>(r, c);
+                //} else {
+                //    out.at<int>(r, c) = overlay.at<int>(r, c);
+                //}
+            }
+        }
+        return out;
+#endif
     }
 
 } // end anonymous namespace
@@ -251,11 +310,9 @@ int main(int argc, char** argv) {
             cout << "pixel position of second part: " << shape.part(1) << endl;
 
             // Convert face shape into X by 2 matrix
-            // LandmarkMatrix landmarks = shape_to_points(shape);
-
             cvmouths_mem.emplace_back();
 
-            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_LIP_POINTS, 10);
+            std::pair<LandmarkMatrix, cv::Mat> cvmouth = crop_to_polygon(img_mat, shape, OUTER_LIP_START, NUM_OUTER_LIP_POINTS, 1.0);
             cv::cvtColor(cvmouth.second, cvmouths_mem.back(), cv::COLOR_BGR2RGB);
 
             cvmouths.emplace_back(cvmouth.first, cvmouths_mem.back());
@@ -274,8 +331,8 @@ int main(int argc, char** argv) {
         int num_frames_no_detection = 0;
 
         cv::namedWindow("camera canvas", cv::WINDOW_AUTOSIZE);
-        cv::namedWindow("matching mouth", cv::WINDOW_AUTOSIZE);
-        cv::namedWindow("matching mouth transformed", cv::WINDOW_AUTOSIZE);
+        //cv::namedWindow("matching mouth", cv::WINDOW_AUTOSIZE);
+        //cv::namedWindow("matching mouth transformed", cv::WINDOW_AUTOSIZE);
 
         // Grab and process frames in a loop.
         while(true) {
@@ -340,10 +397,11 @@ int main(int argc, char** argv) {
                         //cv::imshow("matching mouth", matching_mouth.second);
 
 
-                        //cv::Mat matching_mouth_transformed(temp.rows, temp.cols, temp.type());
-                        //cv::Mat matching_mouth_transformed =
-                        transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, temp,
+                        cv::Mat matching_mouth_transformed = cv::Mat::zeros(temp.rows, temp.cols, temp.type());
+                        transform_by_points(landmarks, matching_mouth.first, matching_mouth.second, matching_mouth_transformed,
                                             OUTER_LIP_START, NUM_LIP_POINTS);
+                        temp = blend(matching_mouth_transformed, temp);
+                        // temp = matching_mouth_transformed;
                         //cv::imshow("matching mouth transformed", matching_mouth_transformed);
 #endif
                     } else {
